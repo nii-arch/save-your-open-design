@@ -107,6 +107,33 @@ def elevate_windows():
         return False
 
 
+def explain_write_failure(path=None):
+    """写入失败时给出诊断。返回 (简短原因, [建议...])。"""
+    path = path or hosts_path()
+    tips = []
+
+    if not is_admin():
+        return ("当前不是管理员权限", [
+            "双击运行时 Windows 不会自动提权，所以写不进 hosts。",
+            "请右键程序 → 以管理员身份运行。",
+        ])
+
+    try:
+        if os.path.exists(path):
+            import stat
+            if not (os.stat(path).st_mode & stat.S_IWRITE):
+                tips.append("hosts 文件是只读的，右键 → 属性 → 取消「只读」。")
+    except OSError:
+        pass
+
+    if is_windows():
+        tips.append("如果装了 360 / 火绒 / 电脑管家，先关掉它们（尤其是"
+                    "「hosts 文件保护」，提权也拦），改完再打开。")
+
+    tips.append("实在不行就用下面的手动方案：把这段内容自己粘进 hosts。")
+    return ("权限不足，写入被拒绝", tips)
+
+
 # ===================================================================== 底层
 def read_hosts(path=None):
     # newline="" 是关键：不加的话 Python 会把 CRLF 统一翻译成 LF，
@@ -263,92 +290,179 @@ def render_block(ips, domains, eol="\n"):
     return eol.join(lines) + eol
 
 
+def _ordered_hits(hit_hosts, domains):
+    """把命中的域名按 domains 给定顺序排列并去重，其余按原顺序追加。
+
+    统一成小写比较，输出用 domains 里的规范写法。
+    """
+    seen = set()
+    out = []
+    low = {h.lower() for h in hit_hosts}
+    for d in domains:
+        if d.lower() in low and d.lower() not in seen:
+            out.append(d)
+            seen.add(d.lower())
+    for h in hit_hosts:
+        if h.lower() not in seen:
+            out.append(h)
+            seen.add(h.lower())
+    return out
+
+
 def plan_write(text, ips, domains):
     """计算写入方案，不落盘。
 
-    返回 (new_text, actions)：
-      actions 是给人看的变更说明，用于写入前预览。
+    返回 (new_text, actions)：actions 是给人看的变更说明。
+
+    幂等保证：同一份 (ips, domains) 反复调用，重复条目不会增长。
     """
     dset = {d.lower() for d in domains}
     lines = _to_lines(text)
     eol = detect_eol(text)
     had_trailing = text.endswith("\n") or text.endswith("\r")
 
-    out = []
-    actions = []
-    touched = False
-    i = 0
+    # 末尾换行会在切行时多出一个空元素，先去掉，否则每跑一次多一个空行
+    if lines and lines[-1] == "":
+        lines.pop()
     n = len(lines)
 
+    # ---------- 第一遍：把文件划分成区域 ----------
+    regions = []
+    i = 0
     while i < n:
-        line = lines[i]
-        s = line.strip()
+        s = lines[i].strip()
 
-        # ---- 本工具的旧托管段：原地换成新内容（含标记） ----
         if s == BEGIN_MARK:
-            while i < n and lines[i].strip() != END_MARK:
-                i += 1
-            i += 1  # 跳过 END
+            j = i + 1
+            while j < n and lines[j].strip() != END_MARK:
+                j += 1
+            if j < n:
+                regions.append({"kind": "mine", "start": i, "end": j})
+                i = j + 1
+            else:                     # 只有 BEGIN，没有 END：吃到文件末尾
+                regions.append({"kind": "mine", "start": i, "end": n})
+                i = n
+            continue
+
+        if _FOREIGN_BEGIN_RE.match(s):
+            j = i + 1
+            while j < n and not _FOREIGN_END_RE.match(lines[j].strip()):
+                j += 1
+            if j < n:
+                regions.append({"kind": "foreign", "start": i, "end": j})
+                i = j + 1
+            else:
+                regions.append({"kind": "foreign", "start": i, "end": n})
+                i = n
+            continue
+
+        ip, hosts = _parse_entry(lines[i])
+        if ip and any(h.lower() in dset for h in hosts):
+            regions.append({"kind": "bare", "start": i, "ip": ip,
+                            "hosts": hosts})
+            i += 1
+            continue
+
+        regions.append({"kind": "keep", "start": i})
+        i += 1
+
+    # ---------- 散落的手工条目：先汇总，最后只在第一条的位置输出一次 ----------
+    bare_hits = []
+    bare_keeps = []
+    for r in regions:
+        if r["kind"] != "bare":
+            continue
+        for h in r["hosts"]:
+            if h.lower() in dset:
+                bare_hits.append(h)
+            else:
+                bare_keeps.append((r["ip"], h))
+    bare_hits = _ordered_hits(bare_hits, domains)
+
+    # ---------- 第二遍：按区域重建 ----------
+    actions = []
+    out = []
+    touched = False
+    bare_done = False
+
+    for r in regions:
+        kind = r["kind"]
+
+        if kind == "keep":
+            out.append(lines[r["start"]])
+            continue
+
+        if kind == "mine":
             out.append(BEGIN_MARK)
             for d in domains:
-                for ip in ips:
-                    out.append(f"{ip} {d}")
+                for ipx in ips:
+                    out.append(f"{ipx} {d}")
             out.append(END_MARK)
             touched = True
-            actions.append(f"更新已有的托管段：改成 {len(ips)} 个 IP × "
+            actions.append(f"更新已有的托管段：{len(ips)} 个 IP × "
                            f"{len(domains)} 个域名")
             continue
 
-        # ---- 其他工具的托管段：只改里面涉及本工具域名的行 ----
-        if _FOREIGN_BEGIN_RE.match(s):
-            out.append(line)
-            i += 1
+        if kind == "foreign":
+            out.append(lines[r["start"]])          # 保留它的 BEGIN 标记
+            local_hits, local_keeps = [], []
+            indent = ""
             changed = 0
-            while i < n and not _FOREIGN_END_RE.match(lines[i].strip()):
-                inner = lines[i]
+            for k in range(r["start"] + 1, r["end"]):
+                inner = lines[k]
                 ip, hosts = _parse_entry(inner)
                 if ip:
                     hit = [h for h in hosts if h.lower() in dset]
-                    keep = [h for h in hosts if h.lower() not in dset]
                     if hit:
-                        indent = _indent(inner)
-                        for ipx in ips:
-                            out.append(f"{indent}{ipx} {' '.join(hit)}")
-                        if keep:
-                            out.append(f"{indent}{ip} {' '.join(keep)}")
+                        if not indent:
+                            indent = _indent(inner)
+                        local_hits.extend(hit)
                         changed += 1
-                        touched = True
-                        i += 1
+                        keep = [h for h in hosts if h.lower() not in dset]
+                        if keep:
+                            local_keeps.append((_indent(inner), ip, keep))
                         continue
-                out.append(inner)
-                i += 1
-            actions.append(f"更新其他工具托管段中的 {changed} 行 IP（保留其标记）")
+                out.append(inner)                  # 无关行原样保留
+            # 每个命中域名只输出一次，避免随行数翻倍
+            for d in _ordered_hits(local_hits, domains):
+                for ipx in ips:
+                    out.append(f"{indent}{ipx} {d}")
+            for ind, ipx, keep in local_keeps:
+                out.append(f"{ind}{ipx} {' '.join(keep)}")
+            if r["end"] < n:
+                out.append(lines[r["end"]])        # 保留它的 END 标记
+            if changed:
+                touched = True
+                actions.append(f"更新其他工具托管段中的 {changed} 行 IP"
+                               f"（保留其标记）")
             continue
 
-        # ---- 手工裸条目：原地改 IP，保留缩进与行尾注释 ----
-        ip, hosts = _parse_entry(line)
-        if ip:
-            hit = [h for h in hosts if h.lower() in dset]
-            if hit:
-                body, comment = _split_comment(line)
-                indent = _indent(line)
-                keep = [h for h in hosts if h.lower() not in dset]
-                for k, ipx in enumerate(ips):
-                    tail = comment if k == 0 and comment else ""
-                    out.append(f"{indent}{ipx} {' '.join(hit)}{(' ' + tail) if tail else ''}")
-                if keep:
-                    out.append(f"{indent}{ip} {' '.join(keep)}"
-                               f"{(' ' + comment) if comment else ''}")
-                touched = True
-                actions.append(f"改写第 {i + 1} 行的手工条目：{ip} → "
-                               f"{', '.join(ips)}（保留注释）")
-                i += 1
+        # ---- 手工裸条目：聚合成一组，只在最早那条的位置输出 ----
+        if bare_done:
+            continue
+        bare_done = True
+        raw = lines[r["start"]]
+        indent = _indent(raw)
+        _, comment = _split_comment(raw)
+        rows = []
+        for d in bare_hits:
+            for ipx in ips:
+                rows.append(f"{indent}{ipx} {d}")
+        if comment and rows:
+            rows[0] = f"{rows[0]} {comment}"
+        seen = set()                               # 这些行上的非目标域名保留
+        for ipx, h in bare_keeps:
+            key = (ipx, h.lower())
+            if key in seen:
                 continue
+            seen.add(key)
+            rows.append(f"{indent}{ipx} {h}")
+        out.extend(rows)
+        touched = True
+        actions.append(f"改写第 {r['start'] + 1} 行的手工条目："
+                       f"{', '.join(bare_hits)} → {', '.join(ips)}（保留注释）")
 
-        out.append(line)
-        i += 1
-
-    # ---- 什么都没找到：末尾追加完整托管段（含标记） ----
+    # ---------- 什么都没找到：末尾追加完整托管段 ----------
     if not touched:
         while out and out[-1].strip() == "":
             out.pop()
@@ -356,8 +470,8 @@ def plan_write(text, ips, domains):
             out.append("")
         out.append(BEGIN_MARK)
         for d in domains:
-            for ip in ips:
-                out.append(f"{ip} {d}")
+            for ipx in ips:
+                out.append(f"{ipx} {d}")
         out.append(END_MARK)
         actions.append(f"在文件末尾新增托管段：{len(ips)} 个 IP × "
                        f"{len(domains)} 个域名（未改动任何已有内容）")

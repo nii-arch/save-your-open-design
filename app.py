@@ -361,6 +361,56 @@ def do_status(domains=None):
     return 0
 
 
+def do_apply_fixed(ips, domains):
+    """跳过扫描，直接用给定 IP 写入（--ip 参数用）。"""
+    if not hosts_tool.is_admin():
+        print("\n  [!] 当前没有管理员权限，无法写 hosts。")
+        if hosts_tool.is_windows():
+            print("      正在尝试以管理员身份重新启动…\n")
+            if hosts_tool.elevate_windows():
+                print("      已弹出 UAC，请在弹窗里点「是」。本窗口可以关掉了。")
+                return 0
+            print("      [X] 提权失败。请右键程序 → 以管理员身份运行。\n")
+        else:
+            print(f"      请用 sudo 重新运行：sudo python3 {sys.argv[0]}\n")
+        return 2
+
+    try:
+        text = hosts_tool.read_hosts()
+        st = hosts_tool.detect_state(text, domains)
+        for w in st["warnings"]:
+            print(f"  [!] {w}")
+    except OSError:
+        pass
+
+    print(f"\n  准备写入：{', '.join(ips)}")
+    print(f"  生效域名：{', '.join(domains)}")
+    try:
+        input("\n  回车确认写入，Ctrl+C 取消…")
+    except (EOFError, KeyboardInterrupt):
+        print("\n  已取消。")
+        return 0
+
+    try:
+        mode, backup, actions = hosts_tool.write_hosts(ips, domains)
+    except (PermissionError, OSError) as exc:
+        reason, tips = hosts_tool.explain_write_failure()
+        if isinstance(exc, OSError) and not isinstance(exc, PermissionError):
+            reason = f"写入失败：{exc}"
+        show_manual(ips, domains, reason=reason, extra_tips=tips)
+        return 2
+
+    print(f"\n  [OK] 已写入 {hosts_tool.hosts_path()}（{mode}）")
+    for act in actions:
+        print(f"       {act}")
+    if backup:
+        print(f"       原文件备份：{backup}")
+    ok, how = hosts_tool.flush_dns()
+    print(f"       DNS 缓存：{'已刷新' if ok else '未刷新'}（{how}）")
+    print("\n  完成。请重新打开浏览器访问。")
+    return 0
+
+
 def do_apply(domains=None, limit=QUICK_POOL, want=2):
     domains = domains or DOMAINS
     if not hosts_tool.is_admin():
@@ -415,11 +465,11 @@ def do_apply(domains=None, limit=QUICK_POOL, want=2):
 
     try:
         mode, backup, actions = hosts_tool.write_hosts(ips, domains)
-    except PermissionError:
-        show_manual(ips, domains, reason="权限不足，写入被拒绝")
-        return 2
-    except OSError as exc:
-        show_manual(ips, domains, reason=f"写入失败：{exc}")
+    except (PermissionError, OSError) as exc:
+        reason, tips = hosts_tool.explain_write_failure()
+        if isinstance(exc, OSError) and not isinstance(exc, PermissionError):
+            reason = f"写入失败：{exc}"
+        show_manual(ips, domains, reason=reason, extra_tips=tips)
         return 2
 
     print(f"\n  [OK] 已写入 {hosts_tool.hosts_path()}（{mode}）")
@@ -461,7 +511,7 @@ def do_revert():
     return 0
 
 
-def show_manual(ips, domains, reason="", path=None):
+def show_manual(ips, domains, reason="", path=None, extra_tips=None):
     info = hosts_tool.manual_instructions(ips, domains, path)
     print()
     hr("=")
@@ -469,6 +519,10 @@ def show_manual(ips, domains, reason="", path=None):
     hr("=")
     if reason:
         print(f"  原因：{reason}\n")
+    if extra_tips:
+        for t in extra_tips:
+            print(f"  · {t}")
+        print()
     print(f"  文件位置：{info['path']}\n")
     print("  需要加入的内容（整段复制，包括首尾两行标记）：\n")
     hr("-")
@@ -575,14 +629,19 @@ def main():
                     help=f"候选池大小，默认 {QUICK_POOL}")
     ap.add_argument("--want", type=int, default=2,
                     help="写入几个 IP，默认 2")
+    ap.add_argument("--ip", default="",
+                    help="跳过扫描，直接用这些 IP 写入（逗号分隔，供测试/复用）")
     a = ap.parse_args()
 
     domains = [d.strip() for d in a.domains.split(",") if d.strip()] if a.domains else DOMAINS
+    fixed_ips = [x.strip() for x in a.ip.split(",") if x.strip()]
 
     if a.action == "scan":
         scan(domains, a.limit)
         return 0
     if a.action == "apply":
+        if fixed_ips:
+            return do_apply_fixed(fixed_ips, domains)
         return do_apply(domains, a.limit, a.want)
     if a.action == "status":
         return do_status()

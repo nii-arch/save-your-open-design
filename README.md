@@ -47,12 +47,7 @@ python app.py scan
 
 输出的表格里，挑「丢包」是 `0.0%` 的那几行，把 IP 记下来，一般取 2 个。
 
-本机实测可用的例子（**仅对我这条线路成立，你那边要重新扫**）：
-
-```
-104.17.144.51
-104.17.144.30
-```
+**记下这两个 IP，下面要用。** 不要抄别人现成的 IP——路由按运营商和地区分，抄来的基本无效。
 
 ### 第二步：用记事本打开 hosts
 
@@ -73,16 +68,29 @@ python app.py scan
 
 ### 第三步：把内容粘到最后
 
-滚动到文件**最末尾**，另起一行，粘贴：
+滚动到文件**最末尾**，另起一行，粘贴下面这段，**把两处 `<你的IP>` 换成你扫到的 IP**：
 
 ```
 # >>> CF-HUNT BEGIN (managed by save-your-open-design) >>>
-104.17.144.51 open-design.ai
-104.17.144.30 open-design.ai
-104.17.144.51 www.open-design.ai
-104.17.144.30 www.open-design.ai
+<你的IP-1> open-design.ai
+<你的IP-2> open-design.ai
+<你的IP-1> www.open-design.ai
+<你的IP-2> www.open-design.ai
 # <<< CF-HUNT END <<<
 ```
+
+替换后应该长这样（`< >` 尖括号也要去掉）：
+
+```
+# >>> CF-HUNT BEGIN (managed by save-your-open-design) >>>
+203.0.113.10 open-design.ai
+203.0.113.20 open-design.ai
+203.0.113.10 www.open-design.ai
+203.0.113.20 www.open-design.ai
+# <<< CF-HUNT END <<<
+```
+
+> 上面 `203.0.113.x` 是示例用的占位地址，**不能直接用**，必须换成你自己扫出来的。
 
 **注意两点：**
 
@@ -182,6 +190,8 @@ HTTPS    真实 TLS + SNI + Host，读 /cdn-cgi/trace 确认机房
 
 **浏览器开了 DoH 会让 hosts 失效。** Chrome / Edge 的「安全 DNS」绕过系统 hosts。配完没效果先去 `设置 → 隐私和安全 → 安全 DNS` 关掉。
 
+**360 / 火绒 / 电脑管家会拦截写 hosts。** 它们的「hosts 文件保护」连管理员权限也拦，表现是程序报「权限不足」。改之前先把安全软件退出，改完再打开。
+
 **ping 不通是正常的。** Cloudflare 边缘 IP 多数不回 ICMP，`ping` 超时不代表不能用，TCP/TLS 不受影响。
 
 **IP 不能复制给别人。** 优选结果强依赖你自己的运营商和地理位置。同城同运营商大概率有效，跨省跨运营商必须重扫。
@@ -215,6 +225,20 @@ pyinstaller cf-hunt.spec --noconfirm
 # 全平台 .pyz（不需要 PyInstaller）
 python build_pyz.py
 ```
+
+---
+
+## 赞助
+
+如果这个工具帮你省了时间，欢迎请我喝杯咖啡 ☕
+
+<!-- 收款码放在此处。把图片存成 donate/wechat.jpg 后取消下面的注释 -->
+
+<!--
+<img src="donate/wechat.jpg" width="220" alt="微信赞赏码">
+-->
+
+**说明：** 赞助是自愿支持，不构成购买任何商品或服务，也不附带功能承诺或技术支持。
 
 ---
 

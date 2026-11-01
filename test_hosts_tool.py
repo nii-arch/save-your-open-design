@@ -90,6 +90,30 @@ def run_case(title, original, expect_other_preserved=True):
         return new_text, actions, state
 
 
+def check_idempotent(title, original, rounds=4):
+    """回归测试：反复写入，条目数必须稳定，不能累加。
+
+    缘起：早期版本在外层托管段有多行同域名时，每行都展开成 N 个 IP，
+    导致重复条目指数膨胀（10 → 18 → 34 → 66 行）。
+    """
+    print(f"\n--- {title} ---")
+    text = original
+    counts = []
+    for _ in range(rounds):
+        text, _actions = H.plan_write(text, IPS, DOMAINS)
+        counts.append(len([ln for ln in text.splitlines()
+                           if any(d in ln.lower() for d in DOMAINS)]))
+    check(f"第 1 轮条目数 = {counts[0]}", counts[0] >= len(IPS) * len(DOMAINS),
+          f"实际 {counts[0]}，至少应为 {len(IPS) * len(DOMAINS)}")
+    check(f"反复写入不膨胀（{counts}）", len(set(counts)) == 1,
+          f"每轮行数：{counts}")
+    check("无重复的 域名+IP 组合",
+          len({ln.strip() for ln in text.splitlines()
+               if any(d in ln.lower() for d in DOMAINS)}) == counts[-1],
+          "存在重复行")
+    return text
+
+
 def main():
     print("=" * 66)
     print(" hosts 安全改写测试")
@@ -183,6 +207,41 @@ def main():
         check("保持 CRLF", b"\r\n" in raw)
         check("没有混入裸 LF", b"\n" not in raw.replace(b"\r\n", b""))
         check("原有内容还在", b"nas.local" in raw)
+
+    # ---------------------------------------------------------------- 场景 9
+    check_idempotent(
+        "场景9：其他工具托管段里有多行同域名（幂等回归）", """\
+127.0.0.1       localhost
+# >>> CLOUDFLARE-PIN BEGIN (managed by cf_pin.py) >>>
+104.18.57.1 open-design.ai
+104.18.56.1 open-design.ai
+104.18.57.1 www.open-design.ai
+104.18.56.1 www.open-design.ai
+104.18.57.1 amr-link.open-design.ai
+# <<< CLOUDFLARE-PIN END <<<
+192.168.1.10    nas.local
+""")
+
+    # ---------------------------------------------------------------- 场景 10
+    check_idempotent(
+        "场景10：手工裸条目有多行同域名（幂等回归）", """\
+127.0.0.1       localhost
+104.26.5.1   open-design.ai    # 我自己加的
+104.26.6.1   open-design.ai
+104.26.5.1   www.open-design.ai
+192.168.1.10    nas.local
+""")
+
+    # ---------------------------------------------------------------- 场景 11
+    check_idempotent(
+        "场景11：本工具自己的段（重复运行的幂等回归）", """\
+127.0.0.1       localhost
+# >>> CF-HUNT BEGIN (managed by save-your-open-design) >>>
+104.99.99.1 open-design.ai
+104.99.99.1 www.open-design.ai
+# <<< CF-HUNT END <<<
+192.168.1.10    nas.local
+""")
 
     # ---------------------------------------------------------------- 汇总
     print("\n" + "=" * 66)
