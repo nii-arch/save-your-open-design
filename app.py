@@ -383,6 +383,10 @@ def do_apply_fixed(ips, domains):
     except OSError:
         pass
 
+    ips = cert_gate(ips, domains)
+    if not ips:
+        return 1
+
     print(f"\n  准备写入：{', '.join(ips)}")
     print(f"  生效域名：{', '.join(domains)}")
     try:
@@ -409,6 +413,27 @@ def do_apply_fixed(ips, domains):
     print(f"       DNS 缓存：{'已刷新' if ok else '未刷新'}（{how}）")
     print("\n  完成。请重新打开浏览器访问。")
     return 0
+
+
+def cert_gate(ips, domains):
+    """写入前的证书闸门：只留下对全部域名都持有合法证书的 IP。
+
+    这一步不是可选的。hosts 会把所有配置的域名都指向选中的 IP，
+    如果某个 IP 的证书对其中一个域名无效，浏览器会直接报证书错误——
+    比不配还糟。扫描阶段的 TLS 是 CERT_NONE，验不出这一点。
+    """
+    if not ips:
+        return []
+    print(f"\n  证书校验（{len(ips)} 个 IP × {len(domains)} 个域名）…")
+    passing, details = cf_hunt.verify_cert_all(ips, domains)
+    for d in details:
+        print(f"    [!] {d}")
+    if passing:
+        print(f"    [OK] 全部通过：{', '.join(passing)}")
+    else:
+        print("    [X] 没有任何 IP 通过证书校验，放弃写入。")
+        print("        如果持续失败，检查系统时间是否正确、根证书是否完整。")
+    return passing
 
 
 def do_apply(domains=None, limit=QUICK_POOL, want=2):
@@ -451,6 +476,13 @@ def do_apply(domains=None, limit=QUICK_POOL, want=2):
     if not ips:
         print("\n  [X] 没扫到零丢包的 IP，放弃写入。")
         print("      （宁可不改，也不要把有丢包的 IP 写进去）")
+        if existing:
+            print(f"      当前 hosts 里已有的配置保持不变：{', '.join(existing)}")
+        return 1
+
+    # 写入前过一遍真实证书校验，不过的不写
+    ips = cert_gate(ips, domains)
+    if not ips:
         if existing:
             print(f"      当前 hosts 里已有的配置保持不变：{', '.join(existing)}")
         return 1

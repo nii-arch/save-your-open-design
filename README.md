@@ -64,8 +64,12 @@ python app.py scan
 <你的IP-2> open-design.ai
 <你的IP-1> www.open-design.ai
 <你的IP-2> www.open-design.ai
+<你的IP-1> amr-link.open-design.ai
+<你的IP-2> amr-link.open-design.ai
 # <<< CF-HUNT END <<<
 ```
+
+最后两行是客户端 API，**别漏**——只配前两个的话网页变快了，客户端还是慢。
 
 替换后应该长这样（`< >` 尖括号也要去掉）：
 
@@ -75,6 +79,8 @@ python app.py scan
 203.0.113.20 open-design.ai
 203.0.113.10 www.open-design.ai
 203.0.113.20 www.open-design.ai
+203.0.113.10 amr-link.open-design.ai
+203.0.113.20 amr-link.open-design.ai
 # <<< CF-HUNT END <<<
 ```
 
@@ -97,7 +103,7 @@ ipconfig /flushdns
 
 ### 还原
 
-把上面那 6 行（含首尾 `#` 标记）整段删掉，再 `ipconfig /flushdns` 即可。
+把上面那 8 行（含首尾 `#` 标记）整段删掉，再 `ipconfig /flushdns` 即可。
 
 ---
 
@@ -107,7 +113,7 @@ ipconfig /flushdns
 
 ```bash
 sudo nano /etc/hosts
-# 粘贴同样的那 6 行到末尾，Ctrl+O 保存，Ctrl+X 退出
+# 粘贴同样的那 8 行到末尾，Ctrl+O 保存，Ctrl+X 退出
 ```
 
 刷新缓存：
@@ -143,6 +149,28 @@ macOS 上如果 `.pyz` 被 Gatekeeper 拦，右键 → 打开，或在终端里 
 如果发现 `0.0.0.0 open-design.ai` 这类**故意屏蔽**的条目，会先警告再改——因为改它等于解除屏蔽。
 
 `还原` 也只移除本工具自己写的那一段。相关测试在 `python test_hosts_tool.py`，共 56 项。
+
+### 写入前会校验证书
+
+选中的 IP 必须先通过**真实证书校验**才会写入：对每个域名走完整 TLS 验签 + 主机名核对，任何一个域名不过，这个 IP 就被排除。
+
+这一步不能省。扫描阶段的 TLS 不校验证书，所以「能握手」不等于「证书对这个域名有效」。如果跳过它，可能把一个证书不匹配的 IP 写进 hosts，浏览器直接报证书错误——比不配还糟。
+
+证书确实无效 → 排除；只是网络不通 → 跳过，不当成证书问题，避免网络抖动误杀好 IP。
+
+`python test_cert_gate.py` 有 10 项测试，其中包含用自签证书验证闸门真能拦住。
+
+---
+
+## 默认优化的三个域名
+
+| 域名 | 用途 |
+|---|---|
+| `open-design.ai` | 主站 |
+| `www.open-design.ai` | 主站（带 www） |
+| `amr-link.open-design.ai` | **客户端 API** |
+
+第三个容易被漏掉。只配前两个的话，网页会变快，但 OpenDesign 客户端的请求仍然走那条烂线路。要加自己的域名用 `--domains`。
 
 ---
 
@@ -195,10 +223,11 @@ HTTPS    真实 TLS + SNI + Host，读 /cdn-cgi/trace 确认机房
 ```
 app.py              交互菜单 + 扫描编排（入口）
 hosts_tool.py       跨平台 hosts 读写、备份、刷新 DNS、提权
-cf_hunt.py          底层扫描器（pool / screen / probe / verify）
+cf_hunt.py          底层扫描器（pool / screen / probe / verify / 证书校验）
 cf_final.py         候选 IP 与 DNS 基线的对比
 cf_ab.py            交错 A/B 对照实验
-test_hosts_tool.py  hosts 改写安全测试
+test_hosts_tool.py  hosts 改写安全测试（56 项）
+test_cert_gate.py   证书闸门测试（10 项，含自签证书反向验证）
 cf-hunt.spec        PyInstaller 配置
 build_pyz.py        打 .pyz 的脚本
 ```

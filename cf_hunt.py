@@ -46,7 +46,10 @@ CF_RANGES = [
 # 默认目标域名。换成你自己的站点，或者用 --domains 传参。
 # 前提条件：该域名必须由 Cloudflare 托管（NS 指向 CF），否则任意 CF 边缘 IP
 # 都不会为它提供有效证书。
-DOMAINS = ["open-design.ai", "www.open-design.ai"]
+#
+# amr-link 是 OpenDesign 客户端的 API 域名，只配主域名的话网页会变快、
+# 但客户端请求仍然走烂线路，所以三个都要。
+DOMAINS = ["open-design.ai", "www.open-design.ai", "amr-link.open-design.ai"]
 PRIMARY = DOMAINS[0]
 PORT = 443
 
@@ -60,6 +63,104 @@ def _ctx() -> ssl.SSLContext:
     except Exception:
         pass
     return ctx
+
+
+def _strict_ctx() -> ssl.SSLContext:
+    """校验证书用：要真的验签 + 验主机名。
+
+    注意必须用 create_default_context()，它会主动加载系统根证书。
+    直接 SSLContext(PROTOCOL_TLS_CLIENT) 出来的是空信任库（0 个根证书），
+    任何证书都会报 unable to get local issuer certificate。
+    """
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    try:
+        ctx.set_alpn_protocols(["http/1.1"])
+    except Exception:
+        pass
+    return ctx
+
+
+def cert_ok(ip, domain, timeout=8.0, tries=3, port=None):
+    """写入前的安全闸门：用真实证书校验连一次。
+
+    能完成 TLS 握手只能说明「这个 IP 愿意握手」，不说明证书对这个域名有效。
+    只有走完整校验（链 + 主机名 + 有效期）才能确认该 IP 确实持有合法证书，
+    否则等于把域名指到一个来路不明的地址上。
+
+    返回 (state, detail)，state 是：
+      "ok"    证书有效
+      "bad"   证书确实有问题（验签失败 / 主机名不符 / 过期）——绝不能写
+      "error" 连不上或超时——是网络问题，不代表证书有问题
+
+    区分这三种很关键：把超时当成「证书无效」，会在网络抖动时
+    误判掉本来可用的 IP，让用户以为没有可用节点。
+    """
+    last = ""
+    use_port = port or PORT
+    for attempt in range(tries):
+        raw = None
+        try:
+            raw = socket.create_connection((ip, use_port), timeout=timeout)
+            raw.settimeout(timeout)
+            with _strict_ctx().wrap_socket(raw, server_hostname=domain) as s:
+                raw = None                  # 所有权已交给 ssl socket
+                cert = s.getpeercert() or {}
+                cn = ""
+                for rdn in cert.get("subject", ()):
+                    for k, v in rdn:
+                        if k == "commonName":
+                            cn = v
+                            break
+                not_after = cert.get("notAfter", "?")
+                return "ok", f"证书有效（CN={cn or '-'}，到期 {not_after}）"
+        except ssl.SSLCertVerificationError as exc:
+            # 证书问题重试无用，直接判死
+            return "bad", f"证书校验失败：{exc.verify_message or exc}"
+        except ssl.SSLError as exc:
+            last = f"TLS 错误：{exc.reason or exc}"
+        except OSError as exc:
+            last = f"连接失败：{exc}"
+        finally:
+            if raw is not None:
+                try:
+                    raw.close()
+                except OSError:
+                    pass
+        if attempt < tries - 1:
+            time.sleep(0.8 * (attempt + 1))
+    return "error", last
+
+
+def verify_cert_all(ips, domains, timeout=8.0):
+    """对 (IP × 域名) 全部组合校验证书。
+
+    返回 (passing_ips, detail_lines)。
+    任一域名证书确实有问题，该 IP 就出局——hosts 会把所有域名都指向它，
+    漏一个就等于漏掉那个域名的保护。
+
+    但「连不上」不算证书问题：网络抖动不该把好 IP 判死。
+    只连接失败的 IP 会单独提示，不计入 passing，也不报成证书错误。
+    """
+    passing, details = [], []
+    for ip in ips:
+        bad, errors = [], []
+        for d in domains:
+            state, msg = cert_ok(ip, d, timeout)
+            if state == "bad":
+                bad.append(f"{d}: {msg}")
+            elif state == "error":
+                errors.append(f"{d}: {msg}")
+        if bad:
+            details.append(f"{ip} 证书无效，已排除：")
+            details.extend(f"    {b}" for b in bad)
+        elif errors:
+            details.append(f"{ip} 网络不通，本次跳过（不是证书问题）：")
+            details.extend(f"    {e}" for e in errors[:2])
+        else:
+            passing.append(ip)
+    return passing, details
 
 
 # --------------------------------------------------------------------------- pool

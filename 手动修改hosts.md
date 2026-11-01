@@ -68,8 +68,12 @@ python app.py scan
 <你的IP-2> open-design.ai
 <你的IP-1> www.open-design.ai
 <你的IP-2> www.open-design.ai
+<你的IP-1> amr-link.open-design.ai
+<你的IP-2> amr-link.open-design.ai
 # <<< CF-HUNT END <<<
 ```
+
+最后两行是**客户端 API**（`amr-link`），漏了的话网页会变快、但客户端请求还是慢。
 
 替换后应该长这样（**尖括号也要去掉**）：
 
@@ -79,6 +83,8 @@ python app.py scan
 203.0.113.20 open-design.ai
 203.0.113.10 www.open-design.ai
 203.0.113.20 www.open-design.ai
+203.0.113.10 amr-link.open-design.ai
+203.0.113.20 amr-link.open-design.ai
 # <<< CF-HUNT END <<<
 ```
 
@@ -128,7 +134,7 @@ ipconfig /flushdns
 sudo nano /etc/hosts
 ```
 
-粘贴同样的那 6 行到末尾。`Ctrl+O` 保存，回车确认，`Ctrl+X` 退出。
+粘贴同样的那 8 行到末尾。`Ctrl+O` 保存，回车确认，`Ctrl+X` 退出。
 
 刷新缓存：
 
@@ -172,7 +178,7 @@ ping open-design.ai
 
 ## 五、怎么还原
 
-用记事本（还是要管理员权限）打开 hosts，把上面那 6 行**整段删掉**——从 `# >>> CF-HUNT BEGIN` 到 `# <<< CF-HUNT END` 全部删除。
+用记事本（还是要管理员权限）打开 hosts，把上面那 8 行**整段删掉**——从 `# >>> CF-HUNT BEGIN` 到 `# <<< CF-HUNT END` 全部删除。
 
 然后：
 
