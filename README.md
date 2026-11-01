@@ -247,7 +247,7 @@ python build_pyz.py
 
 ## 赞助
 
-如果这个工具帮你省了时间，欢迎请我喝杯咖啡 ☕
+如果这个工具帮你省了时间，欢迎请我喝杯咖啡 （攒钱买个M1的无头骑士）☕
 
 <p align="center">
   <img src="donate/wechat.png" width="400" alt="微信赞赏码"><br>
