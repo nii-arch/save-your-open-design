@@ -1,0 +1,13 @@
+# 赞助配置
+#
+# 用法：取消注释并填入你的信息，GitHub 仓库页右侧就会出现 "Sponsor" 按钮。
+#
+# 说明：
+#   - github:  填 GitHub Sponsors 用户名（需先在 https://github.com/sponsors 开通）
+#   - custom:  填任意赞助页链接，最多 4 个。国内推荐爱发电 / 收款码页面
+#
+# 注意：赞助是「自愿支持」，不是「购买商品」，不要承诺功能或售后。
+
+# github: your-github-username
+
+# custom: ["https://afdian.com/a/your-page"]

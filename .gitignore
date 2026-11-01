@@ -1,0 +1,25 @@
+# 扫描产物
+cf_hunt/
+*.json
+!package.json
+*.txt
+!requirements.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地配置
+*.local
+.env
