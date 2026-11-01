@@ -230,6 +230,8 @@ test_hosts_tool.py  hosts 改写安全测试（56 项）
 test_cert_gate.py   证书闸门测试（10 项，含自签证书反向验证）
 cf-hunt.spec        PyInstaller 配置
 build_pyz.py        打 .pyz 的脚本
+手动修改hosts.md    纯手工改 hosts 的完整指南
+镜像同步说明.md     GitHub / CNB 双仓库的维护流程（维护者用）
 ```
 
 自己构建：
