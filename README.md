@@ -1,8 +1,10 @@
-# cf-hunt · Cloudflare 优选 IP 扫描器
+# save-your-open-design
 
-> 给一条丢包严重的国际线路，找一个又快又稳的 Cloudflare 边缘 IP。
+> 拯救你的 OpenDesign 订阅，让你连通的畅快些，毕竟 OD 的订阅超划算。
 
-纯 Python 标准库，零依赖。不需要安装任何东西，`python cf_hunt.py` 就能跑。
+一条丢包 30~50% 的国际线路，能让任何订阅都变得毫无价值。这个工具做的事很简单：**给你这条线路找一条干净的路，然后钉住它。**
+
+Windows / macOS / Linux 都能用。纯 Python 标准库，零依赖。
 
 ---
 
@@ -17,9 +19,9 @@
 
 这个洞察是对的，也是本项目的全部出发点。
 
-我们在自己的网络环境里按它的流程跑了一遍，结果是 **`合格 0 个`**——不是思路错，是测量方法在那个特定线路条件下失效了（原因见下文）。于是我们保留原理、重写了测量部分，做了这个工具。
+我们在自己的网络环境里按它的流程跑了一遍，结果是 **`合格 0 个`**——不是思路错，是测量方法在那个特定线路条件下失效了（原因见下文）。于是我们保留原理、重写了测量部分，把它做成了带界面的可执行程序。
 
-**原项目的代码一行未改、未分发**，仅作为思路来源在本文档中引用。它的 `cf_pin.py` 有很扎实的工程细节（写入前逐域名校验证书、原子写入、自动备份、失败回退），如果你想直接改 hosts，我们仍然推荐用它。
+**原项目的代码一行未改、未分发**，仅作为思路来源在本文档中引用。它的 `cf_pin.py` 有很扎实的工程细节（写入前逐域名校验证书、原子写入、自动备份、失败回退），如果你只想用 Python 脚本改 hosts，我们仍然推荐直接用它的。
 
 ---
 
@@ -56,14 +58,15 @@ DNS 只负责给你一个「就近」的答案，它不测你的线路质量，�
 
 原项目的问题是**测量方法**，不是原理。
 
-| | 原项目 `cf_pin.py` | 本项目 `cf-hunt` |
+| | 原项目 `cf_pin.py` | 本项目 |
 |---|---|---|
 | 候选池 | 256 个 IP | **5952 个**（CF 官方 15 段，每 /24 取 1） |
 | 筛选方式 | 直接 HTTPS 探测 | **三层**：TCP → HTTPS → 串行多采样 |
 | 并发 | 60 路 | **6 路** |
-| 超时 | 1.5 秒 | **5~8 秒** |
+| 超时 | 1.5 秒 | **5~6 秒** |
 | 判定依据 | 单次 p95 | **丢包率 + p50/p95**（多次采样） |
 | 对照实验 | 无 | **交错 A/B**，排除瞬时抖动 |
+| 形态 | Python 脚本 | **可执行程序 + 交互菜单** |
 
 ### 原项目在我们这条线上为什么扫不出东西
 
@@ -80,22 +83,22 @@ DNS 只负责给你一个「就近」的答案，它不测你的线路质量，�
 四层筛选，层层收窄。核心原则是：**单次探测不能作为决策依据**，只有多次采样算出的丢包率才算数。
 
 ```
-pool    生成候选池        5952 个 IP（CF 官方 15 段，每 /24 取 1，随机采样）
+pool    生成候选池        CF 官方 15 段，每 /24 取 1 个，随机采样
   ↓
-screen  TCP 粗筛         只保留能建立 TCP 连接的
+screen  TCP 粗筛          只保留能建立 TCP 连接的
   ↓
-probe   HTTPS 复筛       真实 TLS + SNI + Host，读 /cdn-cgi/trace 拿机房
+probe   HTTPS 复筛        真实 TLS + SNI + Host，读 /cdn-cgi/trace 拿机房
   ↓
-verify  串行终选         每个 IP 打 N 次，算丢包率 + p50/p95
+verify  串行终选          每个 IP 打 N 次，算丢包率 + p50/p95
   ↓
-ab      交错对照         同一时间窗轮流打，证明是路由差异而非瞬时抖动
+ab      交错对照（可选）   同一时间窗轮流打，证明是路由差异而非瞬时抖动
 ```
 
 ### 关键设计
 
 - **必须做真实 HTTPS 探测。** TCP RTT 快不代表能跑 HTTPS——我们实测过香港机房的 IP TCP 只要 143ms，但 TLS 握手全失败。只测延迟会选错。
 - **必须串行多次采样。** 第一次探测里一堆 IP 看着都只要 1.0~1.3 秒，串行打 8 次才发现其中 11 个有 12.5%~50% 的丢包。单次数据会骗人。
-- **必须做交错 A/B。** 如果 A 一直好、B 一直差，是路由差异；如果两个一起变差，是链路瞬时拥塞，之前的排序作废。
+- **只写零丢包的 IP。** 宁可什么都不写，也不要把有丢包的 IP 塞进 hosts——那会让浏览器随机卡顿，比不配还糟。
 
 ---
 
@@ -144,80 +147,158 @@ ab      交错对照         同一时间窗轮流打，证明是路由差异而
 
 ---
 
-## 快速开始
+## 改 hosts 之前，先检测
 
-```bash
-# 1. 生成候选池（默认全部 5952 个，可 --limit 限制数量）
-python cf_hunt.py pool --limit 500
+这是本工具和一般「一键改 hosts」脚本最重要的区别：**它不会盲写，也不会删你的规则。**
 
-# 2. TCP 粗筛
-python cf_hunt.py screen --concurrency 24 --timeout 1.5
+每次写入前先扫描 hosts，分四种情况处理：
 
-# 3. HTTPS 复筛（真实 TLS + SNI + Host）
-python cf_hunt.py probe --top 60 --concurrency 6 --timeout 5
-
-# 4. 串行终选（每 IP 打 8 次）
-python cf_hunt.py verify --top 12 --n 8 --gap 0.3
-
-# 5. 交错 A/B 对照（可选，但强烈建议）
-python cf_ab.py 1.2.3.4 5.6.7.8 --n 15
-```
-
-### 只想复核几个已知 IP？
-
-```bash
-# 直接指定 IP，跳过 pool/screen
-python cf_hunt.py probe --ips "104.18.57.1,104.18.56.1"
-
-# 和当前 DNS 默认路径做同口径对比（含基线）
-python cf_final.py 104.18.57.1 --n 10
-```
-
-### 输出文件
-
-所有结果落在 `cf_hunt/` 目录下：
-
-| 文件 | 内容 |
+| 发现的情况 | 处理方式 |
 |---|---|
-| `pool.txt` | 候选 IP 列表 |
-| `screen.json` | TCP 粗筛结果（IP + RTT） |
-| `probe.json` | HTTPS 复筛结果（IP + 机房 + TCP/TLS/总耗时） |
-| `verify.json` | 终选结果（IP + 丢包率 + p50/p95） |
+| **已有本工具写的托管段** | 原地更新那一段（换 IP），不新增重复条目 |
+| **已有原项目 `cf_pin.py` 写的段**（标记是 `CLOUDFLARE-PIN`） | 原地改段内的 IP，**保留它的标记** |
+| **已有手工添加的裸条目**（如 `104.x.x.x open-design.ai`） | 原地改那一行的 IP，**保留缩进和行尾注释** |
+| **什么都没有** | 在文件末尾新增托管段 |
+
+**无论哪种情况，与这些域名无关的规则一行都不动。** 包括：`127.0.0.1 localhost`、局域网设备映射、广告屏蔽条目、公司内网域名——全部逐字节保留。
+
+### 为什么必须先检测
+
+不检测会有两个真实后果：
+
+1. **重复条目冲突。** 如果 hosts 里已经有一条 `104.26.5.1 open-design.ai`，你再追加一条 `104.18.57.1 open-design.ai`，系统会用**先匹配到的**那条——新写的规则等于没生效。
+2. **覆盖别人的成果。** 如果之前用原项目的 `cf_pin.py` 配过，它有自己的一套标记。识别不到就会各写一段，两条规则打架。
+
+### 会给出警告的情况
+
+如果 hosts 里的是 `0.0.0.0 open-design.ai` 这类**故意屏蔽**的条目（指向非 Cloudflare 段），程序会先警告：
+
+> 第 2 行的手工条目指向 0.0.0.0（非 Cloudflare 段），看起来是故意屏蔽；本工具会改写它，如需保留请先备份。
+
+因为改写它等于解除屏蔽——这可能是你不想要的，所以先提醒。
+
+### 还原也不动别人
+
+`还原` 只移除**本工具自己写的那一段**。其他工具写的、你手工加的规则，全部原样保留。
 
 ---
 
-## 怎么把结果用到 hosts 上
+## 怎么用
 
-扫描器只负责**测量**，不改你的系统。改 hosts 请用下面任一方式。
+### 方式一：下载可执行程序（推荐给普通用户）
 
-### 方式 A：用原项目的工具（推荐）
+从 [Releases](../../releases) 下载对应平台的文件：
 
-原项目的 `cf_pin.py` 有我们没重造的部分：写入前逐域名校验证书链、原子写入、自动备份、失败回退、写完刷新 DNS。
+| 平台 | 文件 | 说明 |
+|---|---|---|
+| Windows | `cf-hunt-windows.exe` | 双击运行，无需 Python |
+| 全平台 | `cf-hunt.pyz` | 需要已装 Python 3.8+ |
+
+打开后是一个菜单：
+
+```
+  1. 扫描优选 IP 并写入 hosts（推荐）
+  2. 只扫描，不修改系统
+  3. 查看当前优选状态
+  4. 还原 hosts（撤销本工具的改动）
+  5. 手动修改说明（不想让程序动系统时用）
+  0. 退出
+```
+
+选 `1`，等 2~3 分钟，程序会自己扫描、挑零丢包的 IP、备份原 hosts、写入、刷新 DNS。
+
+**程序会自己申请管理员权限。** 如果 UAC 弹窗被拒绝、或者写入被安全软件拦截，程序**不会硬来**，而是直接打印现成的配置块和分步操作说明，让你自己复制粘贴。
+
+### 方式二：从源码跑
 
 ```bash
-python cf_pin.py apply --ip 104.18.57.1,104.18.56.1
+# 交互菜单
+python app.py
+
+# 或者用子命令
+python app.py scan      # 只扫描
+python app.py apply     # 扫描并写入
+python app.py status    # 查看状态
+python app.py revert    # 还原
+python app.py manual    # 打印手动说明
 ```
 
-它会先对每个 IP × 每个域名做真实证书校验，全部通过才落盘，并把原文件备份成 `hosts.bak.<时间戳>`。
+### 方式三：只用底层扫描器（改域名、改参数）
 
-### 方式 B：手动改
+```bash
+# 生成候选池（默认全部 5952 个，可 --limit 限制）
+python cf_hunt.py pool --limit 500
 
-编辑 `C:\Windows\System32\drivers\etc\hosts`（需要管理员权限），加入：
+# TCP 粗筛
+python cf_hunt.py screen --concurrency 24 --timeout 1.5
+
+# HTTPS 复筛
+python cf_hunt.py probe --top 60 --concurrency 6 --timeout 5
+
+# 串行终选（每 IP 打 8 次）
+python cf_hunt.py verify --top 12 --n 8 --gap 0.3
+
+# 交错 A/B 对照
+python cf_ab.py 1.2.3.4 5.6.7.8 --n 15
+```
+
+想扫自己的域名：
+
+```bash
+python cf_hunt.py probe --domains "your-site.com,www.your-site.com"
+python app.py apply --domains "your-site.com,www.your-site.com"
+```
+
+> 前提：该域名必须由 Cloudflare 托管。否则任意 CF 边缘 IP 都不会为它提供有效证书。
+
+---
+
+## 跨平台说明
+
+扫描逻辑三平台完全相同，差异只在这三处：
+
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| hosts 路径 | `C:\Windows\System32\drivers\etc\hosts` | `/etc/hosts` | `/etc/hosts` |
+| 刷新 DNS | `ipconfig /flushdns` | `sudo killall -HUP mDNSResponder` | `resolvectl flush-caches` / `nscd` / 无需刷新 |
+| 提权 | UAC 弹窗，或右键「以管理员身份运行」 | `sudo` | `sudo` |
+
+程序会自动识别平台并选对路径和命令，不需要你配置。
+
+### Windows 用户注意
+
+如果双击后提示权限不足，**右键程序 → 以管理员身份运行**。
+
+程序也会自己尝试弹 UAC 提权，但某些环境（组策略限制、安全软件拦截）下会失败，这时走手动路径。
+
+### Linux 用户注意
+
+```bash
+sudo python3 app.py
+```
+
+不想让程序改系统？用只扫描模式，然后按 `python app.py manual` 打印的内容自己改 `/etc/hosts`。
+
+没有 systemd 的老发行版（glibc 直接读 `/etc/hosts`）刷新缓存这步可以跳过。
+
+---
+
+## 手动修改方案
+
+如果程序无法写入（权限、杀软、公司电脑策略），`app.py manual` 会打印这样的内容：
 
 ```
+# >>> CF-HUNT BEGIN (managed by save-your-open-design) >>>
 104.18.57.1 open-design.ai
 104.18.56.1 open-design.ai
 104.18.57.1 www.open-design.ai
 104.18.56.1 www.open-design.ai
+# <<< CF-HUNT END <<<
 ```
 
-然后刷新 DNS 缓存：
+把整段（含首尾标记）追加到 hosts 文件末尾即可。标记的作用是让程序以后能准确找到并只动这一段，不碰你原有的内容。
 
-```bash
-ipconfig /flushdns
-```
-
-**回滚**：删掉你加的那几行，再 `ipconfig /flushdns` 即可。改动前先把原文件复制一份。
+**还原方法**：把这一整段删掉。
 
 ---
 
@@ -239,13 +320,62 @@ Cloudflare 边缘 IP 多数不回 ping。`ping` 超时不代表不能用，TCP/T
 
 国际路由会变，今天最好的 IP 一个月后可能不是最好的。觉得变慢了就重跑一次。
 
+### 安全问题
+
+本程序只做两件事：发起 HTTPS 请求测速、读写 hosts 中自己标记的那一段。
+
+代码里没有任何外发行为——不联网上报数据、不收集信息、不执行远程下发的代码。全部逻辑可审计，只用到 `socket` / `ssl` / `subprocess` 这几个标准库模块。
+
+---
+
+## 项目结构
+
+```
+save-your-open-design/
+├── app.py           交互菜单 + 扫描编排（入口）
+├── hosts_tool.py    跨平台 hosts 读写、备份、刷新 DNS、提权
+├── cf_hunt.py       底层扫描器（pool / screen / probe / verify）
+├── cf_final.py      候选 IP 与 DNS 基线的同口径对比
+├── cf_ab.py         交错 A/B 对照实验
+├── LICENSE          MIT
+└── .github/
+    └── FUNDING.yml  赞助按钮配置
+```
+
+---
+
+## 自己构建
+
+### Windows exe
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --name cf-hunt-windows --console app.py
+```
+
+产物在 `dist/cf-hunt-windows.exe`，单文件，目标机器不需要装 Python。
+
+### 全平台 `.pyz`（不需要 PyInstaller）
+
+```bash
+python -m zipapp . -m "app:main" -o cf-hunt.pyz -p "/usr/bin/env python3"
+```
+
+产物约几十 KB，任何装了 Python 3.8+ 的系统都能跑。
+
+### 说明
+
+PyInstaller **不能交叉编译**：Windows 上只能打出 Windows 的 exe，要 Linux/macOS 的二进制得在对应系统上各打一次。
+
+所以本项目优先推荐 `.pyz`——一份文件全平台通用，代价是用户需要有 Python 环境。
+
 ---
 
 ## 环境
 
-- Python 3.8+（用了 `from __future__ import annotations`，3.8 也能跑）
-- 仅标准库：`socket` / `ssl` / `ipaddress` / `statistics` / `concurrent.futures` / `json`
-- 无第三方依赖，无需 `pip install`
+- Python 3.8+
+- 仅标准库：`socket` / `ssl` / `ipaddress` / `statistics` / `subprocess` / `zipapp`
+- 无第三方运行时依赖（PyInstaller 只在构建时用）
 
 ---
 
@@ -255,5 +385,5 @@ Cloudflare 边缘 IP 多数不回 ping。`ping` 超时不代表不能用，TCP/T
 
 **致谢：**
 
-- **[ft5191306/open-design-ip-optimizer](https://github.com/ft5191306/open-design-ip-optimizer)** — 核心思路的来源。没有它提出的「Cloudflare anycast + 优选 IP 写 hosts」，就没有这个工具。如果你的需求是「一键改 hosts」，直接用它的 `cf_pin.py` 更好，工程细节比我们自己写得更扎实。
+- **[ft5191306/open-design-ip-optimizer](https://github.com/ft5191306/open-design-ip-optimizer)** — 核心思路的来源。没有它提出的「Cloudflare anycast + 优选 IP 写 hosts」，就没有这个工具。如果你的需求只是「用脚本一键改 hosts」，直接用它的 `cf_pin.py` 更好，工程细节比我们写得更扎实。
 - **[Cloudflare](https://www.cloudflare.com/ips/)** — 官方公布的 IPv4 段列表，是本项目候选池的全部来源。
