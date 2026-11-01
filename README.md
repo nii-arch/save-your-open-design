@@ -221,7 +221,7 @@ python build_pyz.py
 如果这个工具帮你省了时间，欢迎请我喝杯咖啡 ☕
 
 <p align="center">
-  <img src="donate/wechat.png" width="220" alt="微信赞赏码"><br>
+  <img src="donate/wechat.png" width="400" alt="微信赞赏码"><br>
   <sub>微信扫码赞赏</sub>
 </p>
 
