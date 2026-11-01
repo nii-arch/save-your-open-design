@@ -220,11 +220,10 @@ python build_pyz.py
 
 如果这个工具帮你省了时间，欢迎请我喝杯咖啡 ☕
 
-<!-- 收款码放在此处。把图片存成 donate/wechat.jpg 后取消下面的注释 -->
-
-<!--
-<img src="donate/wechat.jpg" width="220" alt="微信赞赏码">
--->
+<p align="center">
+  <img src="donate/wechat.png" width="220" alt="微信赞赏码"><br>
+  <sub>微信扫码赞赏</sub>
+</p>
 
 **说明：** 赞助是自愿支持，不构成购买任何商品或服务，也不附带功能承诺或技术支持。
 
