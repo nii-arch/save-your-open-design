@@ -22,7 +22,7 @@ import hosts_tool
 from cf_hunt import CF_RANGES, DOMAINS, PORT, https_probe, tcp_rtt
 
 APP_NAME = "Cloudflare 优选 IP 工具"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # 快速扫描默认规模：普通用户等不了十几分钟
 QUICK_POOL = 320            # 兼容旧参数，实际以分层池为准
@@ -30,8 +30,14 @@ QUICK_SCREEN_CONC = 24
 QUICK_PROBE_TOP = 40
 QUICK_PROBE_CONC = 6
 QUICK_VERIFY_TOP = 6
-QUICK_VERIFY_N = 6
+QUICK_VERIFY_N = 8
 DRILL_PER_PREFIX = 96       # 钻进最优 /20 时，每个前缀细扫多少个 IP
+DRILL_PREFIXES = 2          # 钻进几个最优 /20
+
+# 防回退阈值：新 IP 的 p50 要比当前生效的 IP 快这么多才值得切换。
+# 扫描是每次独立采样，几十毫秒的差异属于噪声；没有这个门槛就会
+# 「今天扫一遍、明天扫一遍，越扫越慢」。
+SWITCH_MARGIN = 0.12
 
 
 # --------------------------------------------------------------------- 控制台
@@ -114,6 +120,37 @@ def build_layered_pool(per20=1):
     return ips
 
 
+def build_drill(prefixes, per_prefix=DRILL_PER_PREFIX):
+    """在每个最优 /20 里各取 per_prefix 个 IP 细扫。
+
+    计数必须按前缀各自算。早先写成全局累计（`if len(drill) >= per_prefix`），
+    第一个前缀填满后第二个前缀只能挤进 1 个 IP —— 日志里「2 个最优 /20
+    细扫 97 个 IP」就是 96+1，实际等于只扫了一个 /20。
+    """
+    out = []
+    if per_prefix <= 0:
+        return out
+    for net in prefixes:
+        n = 0
+        for h in net.hosts():
+            out.append(str(h))
+            n += 1
+            if n >= per_prefix:
+                break
+    return out
+
+
+def merge_keep(cands, keep_ips):
+    """把当前生效的 IP 并入终选池（放末尾，不挤掉新候选）。"""
+    out = [dict(p) for p in cands]
+    seen = {p["ip"] for p in out}
+    for ip in keep_ips:
+        if ip and ip not in seen:
+            seen.add(ip)
+            out.append({"ip": ip, "ok": 0, "total": 10 ** 6, "colo": ""})
+    return out
+
+
 def screen_ips(ips, verbose=True, label=""):
     """TCP 粗筛，返回按 RTT 排序的 [(rtt, ip)]。"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -144,16 +181,18 @@ def probe_ips(ips, domains, verbose=True):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def probe_one(ip):
-        ok, total, colo = 0, None, ""
+        ok, times, colo = 0, [], ""
         for d in domains:
             r = https_probe(ip, d, 5.0)
             if r:
                 ok += 1
                 colo = r["colo"] or colo
-                if total is None or r["total_ms"] < total:
-                    total = r["total_ms"]
-        return {"ip": ip, "ok": ok, "colo": colo,
-                "total": total if total else 10 ** 6}
+                times.append(r["total_ms"])
+        times.sort()
+        # 取中位而不是最快值：三个域名里最快的那个往往只是运气，
+        # 用 min 排名会把「偶尔快一次」的 IP 顶上去，候选池因此不稳定。
+        total = times[len(times) // 2] if times else 10 ** 6
+        return {"ip": ip, "ok": ok, "colo": colo, "total": total}
 
     out = []
     with ThreadPoolExecutor(max_workers=QUICK_PROBE_CONC) as ex:
@@ -166,6 +205,17 @@ def probe_ips(ips, domains, verbose=True):
     return out
 
 
+def rank_key(r):
+    """终选排序键：先丢包，再 p50，最后 p95。
+
+    主指标用 p50 而不是 p95：样本只有个位数时 p95 基本等于最大值，
+    一次抖动就能把好 IP 排到后面——这正是「越跑越慢」的来源之一。
+    """
+    return (r["loss"],
+            r["p50"] if r["p50"] else 10 ** 6,
+            r["p95"] if r["p95"] else 10 ** 6)
+
+
 def verify_ips(ips, primary, n=QUICK_VERIFY_N, verbose=True):
     """串行多采样，算丢包率 + p50/p95。"""
     results = []
@@ -176,6 +226,11 @@ def verify_ips(ips, primary, n=QUICK_VERIFY_N, verbose=True):
         samples, fails, colo = [], 0, ""
         for _ in range(n):
             r = https_probe(ip, primary, 6.0)
+            if r is None:
+                # 单次失败先重试一次再记丢包：瞬时抖动不该让一个好 IP
+                # 整条被淘汰（8 个样本里坏 1 个就会因为 loss>0 被扔掉）。
+                time.sleep(0.15)
+                r = https_probe(ip, primary, 6.0)
             if r:
                 samples.append(r["total_ms"])
                 colo = r["colo"] or colo
@@ -196,7 +251,7 @@ def verify_ips(ips, primary, n=QUICK_VERIFY_N, verbose=True):
         })
     if verbose and total > 3:
         print(" " * 70, end="\r")
-    results.sort(key=lambda r: (r["loss"], r["p95"] if r["p95"] else 10 ** 6))
+    results.sort(key=rank_key)
     return results
 
 
@@ -209,12 +264,15 @@ def print_results(results):
               f"{r['ok']:>4}/{r['n']:<3}{r['loss']:>7.1f}%{p50:>9}{p95:>9}")
 
 
-def scan(domains=None, limit=0, verbose=True, deep=True):
+def scan(domains=None, limit=0, verbose=True, deep=True, keep_ips=()):
     """分层扫描。
 
     第 1 段：每个 /20 抽 1 个点，覆盖全部 CIDR（约 372 个）
     第 2 段：挑出表现最好的 /20，钻进这个前缀细扫
     第 3 段：对候选做串行多采样终选
+
+    keep_ips：当前 hosts 里已生效的 IP。它们会被并入终选池一起测，
+    供 choose_ips() 判断「换不换」。不传就退化成纯全新扫描。
     """
     import ipaddress
     domains = domains or DOMAINS
@@ -259,14 +317,10 @@ def scan(domains=None, limit=0, verbose=True, deep=True):
             if net not in prefixes:
                 prefixes.append(net)
         if prefixes:
-            drill = []
-            for net in prefixes[:2]:
-                for h in net.hosts():
-                    drill.append(str(h))
-                    if len(drill) >= DRILL_PER_PREFIX:
-                        break
+            use = prefixes[:DRILL_PREFIXES]
+            drill = build_drill(use, DRILL_PER_PREFIX)
             if verbose:
-                print(f"\n[3/4] 钻进 {len(prefixes[:2])} 个最优 /20 细扫 "
+                print(f"\n[3/4] 钻进 {len(use)} 个最优 /20 细扫 "
                       f"{len(drill)} 个 IP…")
             drill_alive = screen_ips(drill, verbose)
             pick = [ip for _, ip in drill_alive[:QUICK_PROBE_TOP]]
@@ -281,6 +335,10 @@ def scan(domains=None, limit=0, verbose=True, deep=True):
                 final_pool = sorted(merged.values(),
                                     key=lambda x: (-x["ok"], x["total"]))[:QUICK_VERIFY_TOP]
 
+    # 把当前 hosts 里已生效的 IP 并进终选池：不跟现状 A/B，
+    # 就无法判断这次扫描出来的第一名到底是不是真的更快。
+    final_pool = merge_keep(final_pool, keep_ips)
+
     if verbose:
         print(f"\n[4/4] 终选：{len(final_pool)} 个 IP × {QUICK_VERIFY_N} 次串行采样…")
     results = verify_ips([p["ip"] for p in final_pool], primary, verbose=verbose)
@@ -291,12 +349,81 @@ def scan(domains=None, limit=0, verbose=True, deep=True):
 
 
 
-def pick_ips(results, want=2):
-    """挑可以写进 hosts 的 IP：只接受完全没丢包的。"""
-    clean = [r for r in results if r["loss"] == 0.0 and r["ok"] == r["n"]]
+def current_ips_from_state(st):
+    """从 detect_state() 的结果里取出当前真正生效的 IP。
+
+    三个来源都要看：本工具托管段（mine）、其他工具托管段（foreign，
+    例如 cf_pin.py）、以及手工添加的裸条目（bare）。只看 mine 的话，
+    当配置在别人段里时会被当成「当前没有配置」，于是每次都当全新扫描。
+    """
+    ips = []
+
+    def add(ip):
+        if ip and ip not in ips:
+            ips.append(ip)
+
+    for r in st.get("mine") or []:
+        add(r.get("ip"))
+    for f in st.get("foreign") or []:
+        for r in f.get("rows") or []:
+            add(r.get("ip"))
+    for b in st.get("bare") or []:
+        add(b.get("ip"))
+    return ips
+
+
+def read_current_ips(domains):
+    """读 hosts，取当前生效的 IP；读不到就返回空列表（不抛异常）。"""
+    try:
+        text = hosts_tool.read_hosts()
+    except OSError:
+        return []
+    return current_ips_from_state(hosts_tool.detect_state(text, domains))
+
+
+def choose_ips(results, current=(), want=2, margin=SWITCH_MARGIN, verbose=True):
+    """带防回退的终选：新 IP 没有明显更快，就保留当前配置。
+
+    为什么必须有这一步：扫描每次都是独立采样，第一名本身就有几十毫秒波动。
+    不跟当前生效的 IP 直接比，就会出现「今天扫一遍、明天扫一遍，越扫越慢」。
+
+    规则：
+      * 当前 IP 有丢包 / 没测到 → 不参与保护，直接换新的
+      * 新 IP 的 p50 比当前最好的 IP 快不足 margin → 保留当前
+      * 否则换成新的
+    """
+    clean = sorted([r for r in results
+                    if r["ok"] == r["n"] and r["loss"] == 0.0], key=rank_key)
     if not clean:
         return []
-    return [r["ip"] for r in clean[:want]]
+
+    cur = [r for r in clean if r["ip"] in current]
+    fresh = [r for r in clean if r["ip"] not in current]
+
+    if not cur:
+        return [r["ip"] for r in fresh[:want]]
+
+    cur_best = cur[0]
+    if fresh:
+        new_best = fresh[0]
+        gain = (cur_best["p50"] - new_best["p50"]) / cur_best["p50"]
+        if gain < margin:
+            if verbose:
+                print(f"      当前 {cur_best['ip']} p50={cur_best['p50']:.0f}ms，"
+                      f"新 IP 最快 {new_best['ip']} p50={new_best['p50']:.0f}ms，"
+                      f"只快 {gain * 100:+.0f}%（需 >{margin * 100:.0f}%）")
+                print("      → 保持现状，不切换。")
+            keep = [r["ip"] for r in cur][:want]
+            for r in fresh:
+                if len(keep) >= want:
+                    break
+                keep.append(r["ip"])
+            return keep
+
+    if verbose and fresh:
+        print(f"      新 IP {fresh[0]['ip']} p50={fresh[0]['p50']:.0f}ms"
+              f"（当前 {cur_best['ip']} p50={cur_best['p50']:.0f}ms）→ 切换。")
+    return [r["ip"] for r in fresh[:want]]
 
 
 # --------------------------------------------------------------------- 动作
@@ -456,23 +583,27 @@ def do_apply(domains=None, limit=QUICK_POOL, want=2):
     try:
         text = hosts_tool.read_hosts()
         st = hosts_tool.detect_state(text, domains)
+        # 本工具段、其他工具段、手工条目里的 IP 都算「当前生效」，
+        # 它们是本次扫描的对比基线，用来防止越扫越慢。
+        existing = current_ips_from_state(st)
         if st["mine"]:
             print("\n  检测到本工具之前写入的配置，本次将原地更新。")
-            existing = [r["ip"] for r in st["mine"]]
         elif st["foreign"]:
             print("\n  检测到其他工具写入的配置，本次将原地更新其中的 IP。")
         elif st["bare"]:
             print("\n  检测到手工添加的条目，本次将原地更新其 IP。")
         else:
             print("\n  未检测到相关配置，本次将在 hosts 末尾新增一段。")
+        if existing:
+            print(f"  当前生效的 IP：{', '.join(existing)}（会一起测，用于对比）")
         for w in st["warnings"]:
             print(f"  [!] {w}")
         print("  （文件中与本工具域名无关的规则不会被动到）")
     except OSError as exc:
         print(f"\n  [!] 读 hosts 失败：{exc}")
 
-    results = scan(domains, limit)
-    ips = pick_ips(results, want)
+    results = scan(domains, limit, keep_ips=existing)
+    ips = choose_ips(results, existing, want)
     if not ips:
         print("\n  [X] 没扫到零丢包的 IP，放弃写入。")
         print("      （宁可不改，也不要把有丢包的 IP 写进去）")
@@ -486,6 +617,17 @@ def do_apply(domains=None, limit=QUICK_POOL, want=2):
         if existing:
             print(f"      当前 hosts 里已有的配置保持不变：{', '.join(existing)}")
         return 1
+
+    # 选出来的 IP 和文件里已经生效的一模一样：不写盘，省掉一次备份和 mtime 变动
+    try:
+        text_now = hosts_tool.read_hosts()
+        new_text, _noop_actions = hosts_tool.plan_write(text_now, ips, domains)
+        if new_text == text_now:
+            print("\n  [OK] 扫描结果与当前 hosts 一致，无需改动。")
+            print(f"       生效 IP：{', '.join(ips)}")
+            return 0
+    except OSError:
+        pass
 
     print(f"\n  准备写入：{', '.join(ips)}")
     print(f"  生效域名：{', '.join(domains)}")
@@ -632,7 +774,7 @@ def menu():
             do_apply()
             pause()
         elif choice == "2":
-            scan()
+            scan(keep_ips=read_current_ips(DOMAINS))
             pause()
         elif choice == "3":
             do_status()
@@ -669,7 +811,7 @@ def main():
     fixed_ips = [x.strip() for x in a.ip.split(",") if x.strip()]
 
     if a.action == "scan":
-        scan(domains, a.limit)
+        scan(domains, a.limit, keep_ips=read_current_ips(domains))
         return 0
     if a.action == "apply":
         if fixed_ips:
